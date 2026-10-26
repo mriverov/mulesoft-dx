@@ -18,8 +18,7 @@ export function anypointEnv(extra = {}) {
 // connectors (objectstore, secure-config) only works correctly >= 1.3.1 —
 // below that it authenticates fine for connectors resolvable without
 // Exchange but exits 0 with an empty/failed response for Exchange-gated ones
-// (W-24595327; confirmed empirically by upgrading a reporting user's
-// install). 1.3.1 is a strict superset of 1.3.0, so one floor covers both.
+// (W-24595327). 1.3.1 is a strict superset of 1.3.0, so one floor covers both.
 export const DX_PLUGIN_MIN_MAJOR = 1;
 export const DX_PLUGIN_MIN_MINOR = 3;
 export const DX_PLUGIN_MIN_PATCH = 1;
