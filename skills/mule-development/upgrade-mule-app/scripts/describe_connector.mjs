@@ -37,7 +37,20 @@ import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { mkdirp } from '../lib/fsx.mjs';
 import { parseJavaVersion } from '../lib/platform.mjs';
-import { anypointEnv } from '../lib/anypoint.mjs';
+import { anypointEnv, checkDxPluginVersion, DX_PLUGIN_MIN_LABEL, DX_PLUGIN_UPGRADE_CMD } from '../lib/anypoint.mjs';
+
+// Correlate a describe-connector failure with an outdated DX plugin rather
+// than guessing — Step 1 already gates on DX_PLUGIN_MIN_LABEL, but a plugin
+// installed/upgraded after Step 1 ran (or a describe invoked outside the
+// full skill flow) wouldn't have been caught there. Only attach the hint
+// when the plugin is actually below floor; otherwise this is a different
+// failure and the hint would mislabel it.
+function dxPluginVersionHint() {
+  const { parsed, inRange } = checkDxPluginVersion();
+  if (!parsed || inRange) return '';
+  return `   likely cause: @salesforce/anypoint-cli-dx-mule-plugin ${parsed.version} is below the required ${DX_PLUGIN_MIN_LABEL} — describe-connector's auth for Exchange-gated connectors (objectstore, secure-config) silently fails below this floor.\n` +
+    `   fix: ${DX_PLUGIN_UPGRADE_CMD}, then re-run \`anypoint-cli-v4 plugins\` and confirm the version actually changed before retrying (a stale PATH entry can make the install silently not take effect).\n`;
+}
 
 // ------------------------------------------------------------------
 // Java 17+ gate
@@ -236,6 +249,7 @@ if (r.status !== 0) {
   } else {
     stderr.write(`❌ describe-connector failed for ${GAV}\n`);
   }
+  stderr.write(dxPluginVersionHint());
   exit(1);
 }
 
@@ -244,7 +258,12 @@ if (r.status !== 0) {
 if (stdoutBuf.length === 0) {
   if (stderrBuf.length > 0) stderr.write(stderrBuf);
   stderr.write(`❌ describe-connector returned empty JSON for ${GAV} (args: ${cmdArgs.join(' ')})\n`);
-  stderr.write(`   hint: check --name / --config-name spelling against ${METADATA_DIR}/${NICKNAME}.json (SDK names, not flow XML names)\n`);
+  const hint = dxPluginVersionHint();
+  if (hint) {
+    stderr.write(hint);
+  } else {
+    stderr.write(`   hint: check --name / --config-name spelling against ${METADATA_DIR}/${NICKNAME}.json (SDK names, not flow XML names)\n`);
+  }
   exit(1);
 }
 
