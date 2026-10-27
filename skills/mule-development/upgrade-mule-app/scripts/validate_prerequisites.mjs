@@ -214,14 +214,14 @@ function main() {
     } else {
       log("✅ DX plugin found");
       // Version gate: `dx mule jdk download` (Steps 3b/13, JDK auto-provisioning)
-      // needs >= 1.3.0; describe-connector's Exchange-gated-connector auth
+      // needs >= 1.3.0; describe-connector's auth for some connectors
       // (Step 7) needs >= 1.3.1 (see lib/anypoint.mjs for both reasons behind
       // the floor). Read the version from `plugins`.
       const { parsed: parsedDx, inRange: dxInRange } = checkDxPluginVersion();
       if (!parsedDx) {
         log("⚠️  Could not read DX plugin version from `anypoint-cli-v4 plugins`");
         result.warnings.push(
-          `Could not determine the @salesforce/anypoint-cli-dx-mule-plugin version. This skill requires >= ${DX_PLUGIN_MIN_LABEL} for \`dx mule jdk download\` and for describe-connector to authenticate against Exchange-gated connectors (objectstore, secure-config). If either fails later, upgrade: ${DX_PLUGIN_UPGRADE_CMD}`
+          `Could not determine the @salesforce/anypoint-cli-dx-mule-plugin version. This skill requires >= ${DX_PLUGIN_MIN_LABEL} for \`dx mule jdk download\` and for describe-connector to authenticate against some connectors. If either fails later, upgrade: ${DX_PLUGIN_UPGRADE_CMD}`
         );
       } else {
         result.dxPluginVersion = parsedDx.version;
@@ -231,7 +231,7 @@ function main() {
         } else {
           log(`❌ DX plugin ${parsedDx.version} is below the required ${DX_PLUGIN_MIN_LABEL}`);
           result.errors.push(
-            `@salesforce/anypoint-cli-dx-mule-plugin ${parsedDx.version} found, but this skill requires >= ${DX_PLUGIN_MIN_LABEL} for \`dx mule jdk download\` (Steps 3b/13) and for describe-connector (Step 7) to authenticate against Exchange-gated connectors (objectstore, secure-config) — below this floor it exits 0 with an empty/failed response for those specifically. Upgrade: ${DX_PLUGIN_UPGRADE_CMD}, then re-run \`anypoint-cli-v4 plugins\` and confirm the version actually changed before retrying (a stale PATH entry can make the install silently not take effect).`
+            `@salesforce/anypoint-cli-dx-mule-plugin ${parsedDx.version} found, but this skill requires >= ${DX_PLUGIN_MIN_LABEL} for \`dx mule jdk download\` (Steps 3b/13) and for describe-connector (Step 7) to authenticate against some connectors — below this floor it exits 0 with an empty/failed response for those specifically. Upgrade: ${DX_PLUGIN_UPGRADE_CMD}, then re-run \`anypoint-cli-v4 plugins\` and confirm the version actually changed before retrying (a stale PATH entry can make the install silently not take effect).`
           );
         }
       }

@@ -14,10 +14,10 @@ export function anypointEnv(extra = {}) {
 // source/target JDK (Steps 3b/13) — only exists in
 // @salesforce/anypoint-cli-dx-mule-plugin >= 1.3.0; older plugins pass the
 // `dx --help` presence check but fail at JDK-download time. (2)
-// `describe-connector`'s session-token auth path for Exchange-gated
-// connectors (objectstore, secure-config) only works correctly >= 1.3.1 —
-// below that it authenticates fine for connectors resolvable without
-// Exchange but exits 0 with an empty/failed response for Exchange-gated ones.
+// `describe-connector`'s session-token auth path only works correctly for
+// some connectors >= 1.3.1 — below that it authenticates fine for most
+// connectors but exits 0 with an empty/failed response for others, with no
+// indication it's a version problem.
 // 1.3.1 is a strict superset of 1.3.0, so one floor covers both.
 export const DX_PLUGIN_MIN_MAJOR = 1;
 export const DX_PLUGIN_MIN_MINOR = 3;

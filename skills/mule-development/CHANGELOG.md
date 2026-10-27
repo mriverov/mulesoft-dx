@@ -12,7 +12,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
-- **`upgrade-mule-app`** — the minimum DX Mule plugin version enforced at Step 1 (`validate_prerequisites.mjs`) rises from **1.3.0** to **1.3.1**. Below 1.3.1, `describe-connector`'s (Step 7) session-token auth for Exchange-gated connectors (objectstore, secure-config) exits 0 with an empty/failed response instead of erroring — a second, independent failure mode on top of the 1.3.0 `dx mule jdk download` floor from [1.9.1] (W-24595327). 1.3.1 is a strict superset of 1.3.0, so the single floor now covers both. `describe_connector.mjs` also correlates an unexplained describe failure with an outdated plugin reactively (`checkDxPluginVersion()`), in case the plugin was installed/upgraded after Step 1 ran.
+- **`upgrade-mule-app`** — the minimum DX Mule plugin version enforced at Step 1 (`validate_prerequisites.mjs`) rises from **1.3.0** to **1.3.1**. Below 1.3.1, `describe-connector`'s (Step 7) session-token auth exits 0 with an empty/failed response for some connectors instead of erroring — a second, independent failure mode on top of the 1.3.0 `dx mule jdk download` floor from [1.9.1] (W-24595327). 1.3.1 is a strict superset of 1.3.0, so the single floor now covers both. `describe_connector.mjs` also correlates an unexplained describe failure with an outdated plugin reactively (`checkDxPluginVersion()`), in case the plugin was installed/upgraded after Step 1 ran.
 
 ## [1.9.2] - 2026-09-16
 
