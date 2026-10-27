@@ -10,6 +10,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - The published tarball now also ships every skill under `skills/<skill>/`, alongside the existing flat `<skill>/` layout. MuleSoft Vibes 2.0's npm skills updater requires `<package>/skills/`, while MuleSoft Vibes 1.0 reads the flat package root, so both layouts ship until Vibes 1.0 is retired. The nested copy is generated at pack time by `pack-skills-layout.mjs` (npm `prepack`) and removed afterwards (`postpack`); skill folders in the repo are unchanged. Unpacked size roughly doubles (~1.4 MB → ~2.8 MB).
 
+### Changed
+
+- **`upgrade-mule-app`** — the minimum DX Mule plugin version enforced at Step 1 (`validate_prerequisites.mjs`) rises from **1.3.0** to **1.3.1**. Below 1.3.1, `describe-connector`'s (Step 7) session-token auth for Exchange-gated connectors (objectstore, secure-config) exits 0 with an empty/failed response instead of erroring — a second, independent failure mode on top of the 1.3.0 `dx mule jdk download` floor from [1.9.1] (W-24595327). 1.3.1 is a strict superset of 1.3.0, so the single floor now covers both. `describe_connector.mjs` also correlates an unexplained describe failure with an outdated plugin reactively (`checkDxPluginVersion()`), in case the plugin was installed/upgraded after Step 1 ran.
+
 ## [1.9.2] - 2026-09-16
 
 ### Changed

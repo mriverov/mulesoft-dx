@@ -17,8 +17,8 @@ export function anypointEnv(extra = {}) {
 // `describe-connector`'s session-token auth path for Exchange-gated
 // connectors (objectstore, secure-config) only works correctly >= 1.3.1 —
 // below that it authenticates fine for connectors resolvable without
-// Exchange but exits 0 with an empty/failed response for Exchange-gated ones
-// (W-24595327). 1.3.1 is a strict superset of 1.3.0, so one floor covers both.
+// Exchange but exits 0 with an empty/failed response for Exchange-gated ones.
+// 1.3.1 is a strict superset of 1.3.0, so one floor covers both.
 export const DX_PLUGIN_MIN_MAJOR = 1;
 export const DX_PLUGIN_MIN_MINOR = 3;
 export const DX_PLUGIN_MIN_PATCH = 1;
@@ -51,7 +51,7 @@ export function isDxPluginAtLeastMin(v) {
  * reactively at describe-connector's failure point (correlate, don't guess).
  * @returns {{parsed:{major:number,minor:number,patch:number,version:string}|null, inRange:boolean}} */
 export function checkDxPluginVersion() {
-  const r = spawnSync('anypoint-cli-v4', ['plugins'], { env: anypointEnv(), encoding: 'utf8' });
+  const r = spawnSync('anypoint-cli-v4', ['plugins'], { env: anypointEnv(), encoding: 'utf8', timeout: 10_000 });
   if (r.status !== 0) return { parsed: null, inRange: false };
   const parsed = parseDxPluginVersion(`${r.stdout || ''}${r.stderr || ''}`);
   if (!parsed) return { parsed: null, inRange: false };

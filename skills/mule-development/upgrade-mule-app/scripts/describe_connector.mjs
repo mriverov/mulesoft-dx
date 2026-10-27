@@ -48,7 +48,7 @@ import { anypointEnv, checkDxPluginVersion, DX_PLUGIN_MIN_LABEL, DX_PLUGIN_UPGRA
 function dxPluginVersionHint() {
   const { parsed, inRange } = checkDxPluginVersion();
   if (!parsed || inRange) return '';
-  return `   likely cause: @salesforce/anypoint-cli-dx-mule-plugin ${parsed.version} is below the required ${DX_PLUGIN_MIN_LABEL} — describe-connector's auth for Exchange-gated connectors (objectstore, secure-config) silently fails below this floor.\n` +
+  return `   possible cause: @salesforce/anypoint-cli-dx-mule-plugin ${parsed.version} is below the required ${DX_PLUGIN_MIN_LABEL} — describe-connector's auth for Exchange-gated connectors (objectstore, secure-config) silently fails below this floor. (This connector may not be Exchange-gated, in which case the real cause is something else below.)\n` +
     `   fix: ${DX_PLUGIN_UPGRADE_CMD}, then re-run \`anypoint-cli-v4 plugins\` and confirm the version actually changed before retrying (a stale PATH entry can make the install silently not take effect).\n`;
 }
 
@@ -258,12 +258,8 @@ if (r.status !== 0) {
 if (stdoutBuf.length === 0) {
   if (stderrBuf.length > 0) stderr.write(stderrBuf);
   stderr.write(`❌ describe-connector returned empty JSON for ${GAV} (args: ${cmdArgs.join(' ')})\n`);
-  const hint = dxPluginVersionHint();
-  if (hint) {
-    stderr.write(hint);
-  } else {
-    stderr.write(`   hint: check --name / --config-name spelling against ${METADATA_DIR}/${NICKNAME}.json (SDK names, not flow XML names)\n`);
-  }
+  stderr.write(`   hint: check --name / --config-name spelling against ${METADATA_DIR}/${NICKNAME}.json (SDK names, not flow XML names)\n`);
+  stderr.write(dxPluginVersionHint());
   exit(1);
 }
 

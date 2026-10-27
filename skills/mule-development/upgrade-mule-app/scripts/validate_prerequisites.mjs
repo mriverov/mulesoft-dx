@@ -47,8 +47,7 @@ const MAVEN_REQUIRED_LABEL = `${MAVEN_REQUIRED_MAJOR}.${MAVEN_REQUIRED_MINOR}.x`
 import {
   DX_PLUGIN_MIN_LABEL,
   DX_PLUGIN_UPGRADE_CMD,
-  parseDxPluginVersion,
-  isDxPluginAtLeastMin,
+  checkDxPluginVersion,
 } from "../lib/anypoint.mjs";
 
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
@@ -65,7 +64,7 @@ function log(msg) {
 
 // Run a command, capturing both streams.
 function tryExec(cmd, args) {
-  const r = spawnSync(cmd, args, { encoding: "utf8" });
+  const r = spawnSync(cmd, args, { encoding: "utf8", timeout: 10_000 });
   if (r.error) return { ok: false, out: "", error: r.error.message };
   const combined = `${r.stdout || ""}${r.stderr || ""}`.trim();
   return { ok: r.status === 0, out: combined };
@@ -218,8 +217,7 @@ function main() {
       // needs >= 1.3.0; describe-connector's Exchange-gated-connector auth
       // (Step 7) needs >= 1.3.1 (see lib/anypoint.mjs for both reasons behind
       // the floor). Read the version from `plugins`.
-      const plugins = tryExec("anypoint-cli-v4", ["plugins"]);
-      const parsedDx = plugins.ok ? parseDxPluginVersion(plugins.out) : null;
+      const { parsed: parsedDx, inRange: dxInRange } = checkDxPluginVersion();
       if (!parsedDx) {
         log("⚠️  Could not read DX plugin version from `anypoint-cli-v4 plugins`");
         result.warnings.push(
@@ -227,7 +225,7 @@ function main() {
         );
       } else {
         result.dxPluginVersion = parsedDx.version;
-        result.dxPluginInRange = isDxPluginAtLeastMin(parsedDx);
+        result.dxPluginInRange = dxInRange;
         if (result.dxPluginInRange) {
           log(`✅ DX plugin ${parsedDx.version} (>= ${DX_PLUGIN_MIN_LABEL})`);
         } else {
