@@ -1,7 +1,7 @@
 // Run: node --test skills/mule-development/upgrade-mule-app/lib/maven-settings.test.mjs
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync, writeFileSync, mkdtempSync, rmSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdirSync, mkdtempSync, rmSync, utimesSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { writeMavenSettings, looksLikeAuthFailure } from './maven-settings.mjs';
@@ -88,17 +88,103 @@ test('writeMavenSettings prefers a Connected App over a bearer token', () => {
   rmSync(dir, { recursive: true, force: true });
 });
 
-test('writeMavenSettings is a no-op (warning, original path) when no CLI credentials exist', () => {
+// No acbTempDir override here is deliberately wrong — a real ACB install can
+// have a live acb_settings.xml under ~/AnypointCodeBuilder/.tmp, and this
+// function is the "no session anywhere" case, so it must point at a
+// guaranteed-empty directory instead of trusting the ambient default.
+function emptyAcbTempDir() {
+  return mkdtempSync(join(tmpdir(), 'acb-tmp-empty-'));
+}
+
+function writeAcbSettingsFixture(acbTempDir, pidDirName, username, password, mtimeOffsetMs = 0) {
+  const pidDir = join(acbTempDir, pidDirName);
+  mkdirSync(pidDir, { recursive: true });
+  const p = join(pidDir, 'acb_settings.xml');
+  writeFileSync(p, `<settings>
+  <servers>
+    <server>
+      <id>nexus3</id>
+      <username>acb-nexus-user</username>
+      <password>acb-nexus-secret</password>
+    </server>
+    <server>
+      <username>${username}</username>
+      <password>${password}</password>
+      <id>anypoint-exchange-v3</id>
+    </server>
+  </servers>
+</settings>
+`);
+  if (mtimeOffsetMs !== 0) {
+    const t = new Date(Date.now() + mtimeOffsetMs);
+    utimesSync(p, t, t);
+  }
+  return p;
+}
+
+test('writeMavenSettings is a no-op (warning, original path) when no CLI credentials and no acb_settings.xml exist', () => {
   const dir = mkdtempSync(join(tmpdir(), 'maven-settings-fixture-'));
   const sourcePath = fixtureSettings(dir);
+  const acbTempDir = emptyAcbTempDir();
   withFakeCli({}, () => {
-    const result = writeMavenSettings({ sourcePath });
+    const result = writeMavenSettings({ sourcePath, acbTempDir });
     assert.equal(result.patched, false);
     assert.equal(result.credentialKind, null);
     assert.equal(result.path, sourcePath);
     assert.ok(result.warning);
   });
   rmSync(dir, { recursive: true, force: true });
+  rmSync(acbTempDir, { recursive: true, force: true });
+});
+
+test('writeMavenSettings falls back to acb_settings.xml when the CLI session is empty', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'maven-settings-fixture-'));
+  const sourcePath = fixtureSettings(dir);
+  const acbTempDir = emptyAcbTempDir();
+  writeAcbSettingsFixture(acbTempDir, '12345', '~~~Token~~~', 'acb-live-session-token');
+  withFakeCli({}, () => {
+    const result = writeMavenSettings({ sourcePath, acbTempDir });
+    assert.equal(result.patched, true);
+    assert.equal(result.credentialKind, 'acb');
+    const out = readFileSync(result.path, 'utf8');
+    assert.match(out, /<username>~~~Token~~~<\/username>/);
+    assert.match(out, /<password>acb-live-session-token<\/password>/);
+  });
+  rmSync(dir, { recursive: true, force: true });
+  rmSync(acbTempDir, { recursive: true, force: true });
+});
+
+test('writeMavenSettings prefers the anypoint-cli-v4 session over acb_settings.xml when both exist', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'maven-settings-fixture-'));
+  const sourcePath = fixtureSettings(dir);
+  const acbTempDir = emptyAcbTempDir();
+  writeAcbSettingsFixture(acbTempDir, '12345', '~~~Token~~~', 'acb-session-should-not-be-used');
+  withFakeCli({ token: 'cli-session-token' }, () => {
+    const result = writeMavenSettings({ sourcePath, acbTempDir });
+    assert.equal(result.credentialKind, 'token');
+    const out = readFileSync(result.path, 'utf8');
+    assert.match(out, /<password>cli-session-token<\/password>/);
+    assert.doesNotMatch(out, /acb-session-should-not-be-used/);
+  });
+  rmSync(dir, { recursive: true, force: true });
+  rmSync(acbTempDir, { recursive: true, force: true });
+});
+
+test('writeMavenSettings picks the most recently modified acb_settings.xml when several PID dirs exist', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'maven-settings-fixture-'));
+  const sourcePath = fixtureSettings(dir);
+  const acbTempDir = emptyAcbTempDir();
+  writeAcbSettingsFixture(acbTempDir, 'old-pid', '~~~Token~~~', 'stale-backend-session', -60_000);
+  writeAcbSettingsFixture(acbTempDir, 'new-pid', '~~~Token~~~', 'active-backend-session', 0);
+  withFakeCli({}, () => {
+    const result = writeMavenSettings({ sourcePath, acbTempDir });
+    assert.equal(result.credentialKind, 'acb');
+    const out = readFileSync(result.path, 'utf8');
+    assert.match(out, /<password>active-backend-session<\/password>/);
+    assert.doesNotMatch(out, /stale-backend-session/);
+  });
+  rmSync(dir, { recursive: true, force: true });
+  rmSync(acbTempDir, { recursive: true, force: true });
 });
 
 test('writeMavenSettings is a no-op when the source settings.xml has no exchange-v3 server', () => {

@@ -17,13 +17,26 @@
 // and pass through untouched. If the exchange-v3 block isn't present at all,
 // this is a no-op (patched: false) — synthesizing one from scratch is the
 // plugin's job (lib/helpers/exchange-settings.js), not the skill's.
-import { readFileSync, writeFileSync, mkdtempSync, existsSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdtempSync, existsSync, readdirSync, statSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { anypointEnv } from './anypoint.mjs';
 
 const EXCHANGE_SERVER_ID = 'anypoint-exchange-v3';
+
+// ACB (Anypoint Code Builder) has its own, separate Maven settings file —
+// acb_settings.xml, written by mule-dx-platform's DefaultSettingsManager
+// under <mule.homeDirectory, default ~/AnypointCodeBuilder>/.tmp/<backend-pid>/.
+// ACB keeps the anypoint-exchange-v3 <server> credential in that file fresh
+// on its own token-refresh timer, driven by the IDE's native "Sign in"
+// session (VS Code AuthenticationSession + its own KeyStore) — a DIFFERENT
+// credential store than `anypoint-cli-v4 conf`, which only knows about a
+// separate `anypoint-cli-v4 login`. A customer who only ever signs in
+// through ACB's own UI has nothing in `anypoint-cli-v4 conf`, so this is the
+// fallback: if the CLI has no session, look for a live acb_settings.xml and
+// borrow its already-fresh Exchange credential.
+const ACB_TEMP_DIR_DEFAULT = join(homedir(), 'AnypointCodeBuilder', '.tmp');
 
 // Same precedence as the plugin: a static Connected App beats the short-lived
 // session bearer token.
@@ -47,7 +60,57 @@ function unwrapToken(raw) {
   return raw;
 }
 
-function readCredentials() {
+// Find the <server> block whose <id> is EXCHANGE_SERVER_ID. Returns the
+// matched block text, or null.
+function findExchangeServerBlock(xml) {
+  const serverRe = /<server\b[^>]*>[\s\S]*?<\/server>/g;
+  let m;
+  while ((m = serverRe.exec(xml)) !== null) {
+    const idMatch = /<id>\s*([^<]*?)\s*<\/id>/.exec(m[0]);
+    if (idMatch && idMatch[1] === EXCHANGE_SERVER_ID) return m[0];
+  }
+  return null;
+}
+
+// Read-only: extract { username, password } from the anypoint-exchange-v3
+// <server> block of an arbitrary settings-shaped XML file (used against
+// ACB's acb_settings.xml, never against the real ~/.m2/settings.xml).
+function extractExchangeServerCredential(xml) {
+  const block = findExchangeServerBlock(xml);
+  if (!block) return null;
+  const username = /<username>([\s\S]*?)<\/username>/.exec(block)?.[1]?.trim();
+  const password = /<password>([\s\S]*?)<\/password>/.exec(block)?.[1]?.trim();
+  if (!username || !password) return null;
+  return { username, password };
+}
+
+// Scan <acbTempDir>/<any-subdir>/acb_settings.xml and return the credential
+// from whichever one was modified most recently — ACB refreshes the file on
+// a timer while its backend is running, so recency is the best signal for
+// "the currently active session" without knowing the backend's actual PID.
+function readAcbSettingsCredentials(acbTempDir) {
+  if (!existsSync(acbTempDir)) return null;
+  let entries;
+  try {
+    entries = readdirSync(acbTempDir, { withFileTypes: true });
+  } catch {
+    return null;
+  }
+
+  const candidates = entries
+    .filter((e) => e.isDirectory())
+    .map((e) => join(acbTempDir, e.name, 'acb_settings.xml'))
+    .filter((p) => existsSync(p))
+    .map((p) => ({ path: p, mtimeMs: statSync(p).mtimeMs }))
+    .sort((a, b) => b.mtimeMs - a.mtimeMs);
+
+  if (candidates.length === 0) return null;
+
+  const xml = readFileSync(candidates[0].path, 'utf8');
+  return extractExchangeServerCredential(xml);
+}
+
+function readCredentials(opts) {
   const clientId = readConfValue('client_id');
   const clientSecret = readConfValue('client_secret');
   if (clientId && clientSecret) {
@@ -57,6 +120,13 @@ function readCredentials() {
   if (token) {
     return { kind: 'token', username: '~~~Token~~~', password: token };
   }
+
+  const acbTempDir = opts.acbTempDir || ACB_TEMP_DIR_DEFAULT;
+  const acbCreds = readAcbSettingsCredentials(acbTempDir);
+  if (acbCreds) {
+    return { kind: 'acb', username: acbCreds.username, password: acbCreds.password };
+  }
+
   return null;
 }
 
@@ -86,11 +156,13 @@ function patchExchangeServer(xml, creds) {
 /**
  * Writes a temp copy of the user's ~/.m2/settings.xml with the
  * anypoint-exchange-v3 <server> credential refreshed from the live CLI
- * session. Never mutates the real settings.xml.
+ * session (or, when that session is empty, ACB's own acb_settings.xml).
+ * Never mutates the real settings.xml.
  *
- * @param {{ sourcePath?: string }} [opts] sourcePath overrides
- *   ~/.m2/settings.xml (for tests).
- * @returns {{ path: string, patched: boolean, credentialKind: 'client'|'token'|null, warning?: string }}
+ * @param {{ sourcePath?: string, acbTempDir?: string }} [opts] sourcePath
+ *   overrides ~/.m2/settings.xml, acbTempDir overrides
+ *   ~/AnypointCodeBuilder/.tmp (for tests).
+ * @returns {{ path: string, patched: boolean, credentialKind: 'client'|'token'|'acb'|null, warning?: string }}
  *   path is always usable with `mvn -s <path>` — when nothing could be
  *   patched, path points at an unmodified copy of the source (or the source
  *   itself, if there is no source) so the caller can pass -s unconditionally.
@@ -102,10 +174,10 @@ export function writeMavenSettings(opts = {}) {
     return { path: sourcePath, patched: false, credentialKind: null, warning: `${sourcePath} not found; mvn will run with no custom settings.` };
   }
 
-  const creds = readCredentials();
+  const creds = readCredentials(opts);
   const xml = readFileSync(sourcePath, 'utf8');
   if (!creds) {
-    return { path: sourcePath, patched: false, credentialKind: null, warning: 'No Anypoint CLI session credentials found (anypoint-cli-v4 conf client_id/client_secret/token all empty); using settings.xml as-is.' };
+    return { path: sourcePath, patched: false, credentialKind: null, warning: 'No Anypoint CLI session credentials found (anypoint-cli-v4 conf client_id/client_secret/token empty, and no acb_settings.xml session found); using settings.xml as-is.' };
   }
 
   const { xml: patchedXml, found } = patchExchangeServer(xml, creds);
