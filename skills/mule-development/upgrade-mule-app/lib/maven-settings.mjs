@@ -118,3 +118,21 @@ export function writeMavenSettings(opts = {}) {
   writeFileSync(outPath, patchedXml, { mode: 0o600 });
   return { path: outPath, patched: true, credentialKind: creds.kind };
 }
+
+// writeMavenSettings() can only forward whatever credential the live CLI
+// session currently reports — it has no way to know that credential is dead
+// until Maven actually tries to use it. A 401 at that point is an EXPIRED
+// SESSION, not a build defect: no code edit will fix it, and the Step 16/17
+// retry classifiers must not burn a retry guessing at one. This is the
+// signal callers check to route to "ask the user to re-login" instead.
+const AUTH_FAILURE_RE =
+  /\b401\b|status code:\s*401|ReasonPhrase:\s*Unauthorized|Not authorized to access|\bUnauthorized\b/i;
+
+/**
+ * @param {string} mvnOutput combined stdout+stderr from a failed mvn run.
+ * @returns {boolean} true when the failure looks like an expired/invalid
+ *   Anypoint CLI session rather than a code/XSD/dependency defect.
+ */
+export function looksLikeAuthFailure(mvnOutput) {
+  return AUTH_FAILURE_RE.test(mvnOutput || '');
+}

@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import { readFileSync, writeFileSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { writeMavenSettings } from './maven-settings.mjs';
+import { writeMavenSettings, looksLikeAuthFailure } from './maven-settings.mjs';
 
 // These tests exercise the pure settings.xml patching path with a fixture
 // source file. They don't depend on a real anypoint-cli-v4 session, so they
@@ -119,4 +119,21 @@ test('writeMavenSettings is a no-op when the source file does not exist', () => 
   assert.equal(result.patched, false);
   assert.equal(result.path, '/nonexistent/path/settings.xml');
   assert.ok(result.warning);
+});
+
+test('looksLikeAuthFailure detects common Maven 401/Unauthorized phrasings', () => {
+  assert.ok(looksLikeAuthFailure(
+    'Could not transfer artifact ... from/to anypoint-exchange-v3: status code: 401, reason phrase: Unauthorized (401)'
+  ));
+  assert.ok(looksLikeAuthFailure('Return code is: 401, ReasonPhrase: Unauthorized.'));
+  assert.ok(looksLikeAuthFailure('Not authorized to access group com.mulesoft.connectors'));
+  assert.ok(looksLikeAuthFailure('401 Unauthorized'));
+});
+
+test('looksLikeAuthFailure does not flag an unrelated build failure', () => {
+  assert.equal(looksLikeAuthFailure(
+    '[ERROR] cvc-complex-type.3.2.2: Attribute \'method\' is not allowed to appear in element \'http:listener\''
+  ), false);
+  assert.equal(looksLikeAuthFailure(''), false);
+  assert.equal(looksLikeAuthFailure(undefined), false);
 });
