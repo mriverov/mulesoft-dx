@@ -75,6 +75,80 @@ test('writeMavenSettings refreshes only the anypoint-exchange-v3 server, leaves 
   rmSync(dir, { recursive: true, force: true });
 });
 
+function fixtureSettingsV2Only(dir) {
+  const p = join(dir, 'settings.xml');
+  writeFileSync(p, `<settings>
+  <servers>
+    <server>
+      <id>nexus3</id>
+      <username>marinarivero</username>
+      <password>unrelated-nexus-secret</password>
+    </server>
+    <server>
+      <username>stale-user</username>
+      <password>stale-expired-token</password>
+      <id>anypoint-exchange-v2</id>
+    </server>
+  </servers>
+</settings>
+`);
+  return p;
+}
+
+function fixtureSettingsV2AndV3(dir) {
+  const p = join(dir, 'settings.xml');
+  writeFileSync(p, `<settings>
+  <servers>
+    <server>
+      <id>nexus3</id>
+      <username>marinarivero</username>
+      <password>unrelated-nexus-secret</password>
+    </server>
+    <server>
+      <username>stale-user</username>
+      <password>stale-expired-token</password>
+      <id>anypoint-exchange-v2</id>
+    </server>
+    <server>
+      <username>stale-user</username>
+      <password>stale-expired-token</password>
+      <id>anypoint-exchange-v3</id>
+    </server>
+  </servers>
+</settings>
+`);
+  return p;
+}
+
+test('writeMavenSettings refreshes a legacy anypoint-exchange-v2 server when v3 is absent', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'maven-settings-fixture-'));
+  const sourcePath = fixtureSettingsV2Only(dir);
+  withFakeCli({ token: 'fresh-session-token' }, () => {
+    const result = writeMavenSettings({ sourcePath });
+    assert.equal(result.patched, true);
+    assert.equal(result.credentialKind, 'token');
+    const out = readFileSync(result.path, 'utf8');
+    assert.match(out, /<id>anypoint-exchange-v2<\/id>/);
+    assert.match(out, /<password>fresh-session-token<\/password>/);
+    assert.doesNotMatch(out, /stale-expired-token/);
+  });
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test('writeMavenSettings refreshes both anypoint-exchange-v2 and anypoint-exchange-v3 when both are present', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'maven-settings-fixture-'));
+  const sourcePath = fixtureSettingsV2AndV3(dir);
+  withFakeCli({ token: 'fresh-session-token' }, () => {
+    const result = writeMavenSettings({ sourcePath });
+    assert.equal(result.patched, true);
+    const out = readFileSync(result.path, 'utf8');
+    const matches = out.match(/<password>fresh-session-token<\/password>/g) || [];
+    assert.equal(matches.length, 2);
+    assert.doesNotMatch(out, /stale-expired-token/);
+  });
+  rmSync(dir, { recursive: true, force: true });
+});
+
 test('writeMavenSettings prefers a Connected App over a bearer token', () => {
   const dir = mkdtempSync(join(tmpdir(), 'maven-settings-fixture-'));
   const sourcePath = fixtureSettings(dir);
@@ -187,10 +261,44 @@ test('writeMavenSettings picks the most recently modified acb_settings.xml when 
   rmSync(acbTempDir, { recursive: true, force: true });
 });
 
-test('writeMavenSettings is a no-op when the source settings.xml has no exchange-v3 server', () => {
+test('writeMavenSettings synthesizes both exchange blocks from scratch when settings.xml has neither (Scenario H)', () => {
   const dir = mkdtempSync(join(tmpdir(), 'maven-settings-fixture-'));
   const sourcePath = join(dir, 'settings.xml');
   writeFileSync(sourcePath, '<settings><servers><server><id>nexus3</id><username>u</username><password>p</password></server></servers></settings>\n');
+  withFakeCli({ token: 'fresh-session-token' }, () => {
+    const result = writeMavenSettings({ sourcePath });
+    assert.equal(result.patched, true);
+    assert.equal(result.credentialKind, 'token');
+    const out = readFileSync(result.path, 'utf8');
+    assert.match(out, /<id>anypoint-exchange-v2<\/id>/);
+    assert.match(out, /<id>anypoint-exchange-v3<\/id>/);
+    const matches = out.match(/<password>fresh-session-token<\/password>/g) || [];
+    assert.equal(matches.length, 2);
+    // nexus3 and the real settings.xml on disk are both untouched.
+    assert.match(out, /<id>nexus3<\/id>/);
+    assert.equal(readFileSync(sourcePath, 'utf8'), '<settings><servers><server><id>nexus3</id><username>u</username><password>p</password></server></servers></settings>\n');
+  });
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test('writeMavenSettings synthesizes a <servers> container when settings.xml has none at all', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'maven-settings-fixture-'));
+  const sourcePath = join(dir, 'settings.xml');
+  writeFileSync(sourcePath, '<settings></settings>\n');
+  withFakeCli({ token: 'fresh-session-token' }, () => {
+    const result = writeMavenSettings({ sourcePath });
+    assert.equal(result.patched, true);
+    const out = readFileSync(result.path, 'utf8');
+    assert.match(out, /<id>anypoint-exchange-v2<\/id>/);
+    assert.match(out, /<id>anypoint-exchange-v3<\/id>/);
+  });
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test('writeMavenSettings is a no-op when the source settings.xml has no <settings> root at all (Scenario F)', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'maven-settings-fixture-'));
+  const sourcePath = join(dir, 'settings.xml');
+  writeFileSync(sourcePath, '');
   withFakeCli({ token: 'fresh-session-token' }, () => {
     const result = writeMavenSettings({ sourcePath });
     assert.equal(result.patched, false);

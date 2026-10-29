@@ -10,20 +10,30 @@
 // SEPARATE Maven invocation that the plugin has no part in, so they need the
 // same refresh applied here, independently.
 //
-// Scope is deliberately narrow: this only refreshes the `anypoint-exchange-v3`
-// <server> credential. It does NOT synthesize settings.xml from scratch and
-// does NOT touch Nexus/orbit <server> entries — those are long-lived personal
-// credentials that are already present in a provisioned ~/.m2/settings.xml
-// and pass through untouched. If the exchange-v3 block isn't present at all,
-// this is a no-op (patched: false) — synthesizing one from scratch is the
-// plugin's job (lib/helpers/exchange-settings.js), not the skill's.
+// Scope: refresh (or, if missing, add) the `anypoint-exchange-v2` and
+// `anypoint-exchange-v3` <server> credentials (both share the same bearer
+// token/Connected App — a pom.xml may still declare the legacy v2 repository
+// id, so both are kept fresh with the same live credential) in a TEMP COPY
+// of settings.xml only; the real ~/.m2/settings.xml on disk is never
+// written to, in any code path below. This does NOT touch Nexus/orbit
+// <server> entries — those are long-lived personal credentials that are
+// already present in a provisioned ~/.m2/settings.xml and pass through
+// untouched. It also does NOT add a <profile><repository> binding like the
+// plugin's own lib/helpers/exchange-settings.js does — the skill's own `mvn`
+// calls always run inside the target app directory, where the app's own
+// pom.xml already declares whichever anypoint-exchange-v2/v3 <repository>
+// id/URL it needs; only the matching credential is this function's job.
 import { readFileSync, writeFileSync, mkdtempSync, existsSync, readdirSync, statSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { anypointEnv } from './anypoint.mjs';
 
-const EXCHANGE_SERVER_ID = 'anypoint-exchange-v3';
+// v3 is preferred when both are present in a credential-lookup context (e.g.
+// borrowing a representative credential from ACB's acb_settings.xml) since
+// it's the currently canonical endpoint; v2 is kept for legacy pom.xml files
+// that still declare it.
+const EXCHANGE_SERVER_IDS = ['anypoint-exchange-v3', 'anypoint-exchange-v2'];
 
 // ACB (Anypoint Code Builder) has its own, separate Maven settings file —
 // acb_settings.xml, written by mule-dx-platform's DefaultSettingsManager
@@ -60,21 +70,27 @@ function unwrapToken(raw) {
   return raw;
 }
 
-// Find the <server> block whose <id> is EXCHANGE_SERVER_ID. Returns the
-// matched block text, or null.
+// Find the <server> block whose <id> is one of EXCHANGE_SERVER_IDS, trying
+// each id in order. Returns the matched block text, or null.
 function findExchangeServerBlock(xml) {
   const serverRe = /<server\b[^>]*>[\s\S]*?<\/server>/g;
+  const blocksById = new Map();
   let m;
   while ((m = serverRe.exec(xml)) !== null) {
     const idMatch = /<id>\s*([^<]*?)\s*<\/id>/.exec(m[0]);
-    if (idMatch && idMatch[1] === EXCHANGE_SERVER_ID) return m[0];
+    if (idMatch) blocksById.set(idMatch[1], m[0]);
+  }
+  for (const id of EXCHANGE_SERVER_IDS) {
+    if (blocksById.has(id)) return blocksById.get(id);
   }
   return null;
 }
 
-// Read-only: extract { username, password } from the anypoint-exchange-v3
-// <server> block of an arbitrary settings-shaped XML file (used against
-// ACB's acb_settings.xml, never against the real ~/.m2/settings.xml).
+// Read-only: extract { username, password } from whichever Exchange
+// <server> block (v3 preferred, else v2) is present in an arbitrary
+// settings-shaped XML file (used against ACB's acb_settings.xml, never
+// against the real ~/.m2/settings.xml). Both ids share the same bearer
+// token, so either one is a representative credential.
 function extractExchangeServerCredential(xml) {
   const block = findExchangeServerBlock(xml);
   if (!block) return null;
@@ -130,17 +146,18 @@ function readCredentials(opts) {
   return null;
 }
 
-// Replace (or insert) <username>/<password> inside the <server> block whose
-// <id> is EXCHANGE_SERVER_ID. Tolerant of child-element order and whitespace;
-// every other <server>/<profile>/<mirror> in the file is left byte-for-byte
-// untouched. Returns { xml, found }.
-function patchExchangeServer(xml, creds) {
+// Replace <username>/<password> inside every EXISTING <server> block whose
+// <id> is in EXCHANGE_SERVER_IDS. Tolerant of child-element order and
+// whitespace; every other <server>/<profile>/<mirror> in the file is left
+// byte-for-byte untouched. Returns { xml, foundIds } where foundIds is the
+// set of EXCHANGE_SERVER_IDS that already had a block (and got refreshed).
+function patchExistingExchangeServers(xml, creds) {
   const serverRe = /<server\b[^>]*>[\s\S]*?<\/server>/g;
-  let found = false;
+  const foundIds = new Set();
   const patched = xml.replace(serverRe, (block) => {
     const idMatch = /<id>\s*([^<]*?)\s*<\/id>/.exec(block);
-    if (!idMatch || idMatch[1] !== EXCHANGE_SERVER_ID) return block;
-    found = true;
+    if (!idMatch || !EXCHANGE_SERVER_IDS.includes(idMatch[1])) return block;
+    foundIds.add(idMatch[1]);
     let next = block;
     next = /<username>[\s\S]*?<\/username>/.test(next)
       ? next.replace(/<username>[\s\S]*?<\/username>/, `<username>${creds.username}</username>`)
@@ -150,14 +167,47 @@ function patchExchangeServer(xml, creds) {
       : next.replace(/<\/server>/, `  <password>${creds.password}</password>\n</server>`);
     return next;
   });
-  return { xml: patched, found };
+  return { xml: patched, foundIds };
+}
+
+// For any EXCHANGE_SERVER_IDS not already present (per foundIds), append a
+// brand-new <server> block with creds. A customer who's never run the DX
+// plugin's own describe-connector (which would have provisioned the v3
+// block) or who only ever declared the legacy v2 repository in their pom.xml
+// may have neither block yet — this only ever touches the in-memory string
+// that becomes the TEMP settings.xml copy, never the real file. Appends to
+// an existing <servers>/<servers/> container if present, otherwise inserts a
+// new <servers> container right after the <settings ...> opening tag. If
+// there's no recognizable <settings ...> root at all (e.g. an empty file),
+// this is a no-op and the missing ids stay missing — same as before.
+function addMissingExchangeServers(xml, creds, foundIds) {
+  const missingIds = EXCHANGE_SERVER_IDS.filter((id) => !foundIds.has(id));
+  if (missingIds.length === 0) return { xml, addedIds: [] };
+
+  const newBlocks = missingIds
+    .map((id) => `    <server>\n      <id>${id}</id>\n      <username>${creds.username}</username>\n      <password>${creds.password}</password>\n    </server>\n`)
+    .join('');
+
+  if (/<servers>[\s\S]*?<\/servers>/.test(xml)) {
+    return { xml: xml.replace(/<\/servers>/, `${newBlocks}  </servers>`), addedIds: missingIds };
+  }
+  if (/<servers\s*\/>/.test(xml)) {
+    return { xml: xml.replace(/<servers\s*\/>/, `<servers>\n${newBlocks}  </servers>`), addedIds: missingIds };
+  }
+  if (/<settings\b[^>]*>/.test(xml)) {
+    return { xml: xml.replace(/<settings\b[^>]*>/, (tag) => `${tag}\n  <servers>\n${newBlocks}  </servers>`), addedIds: missingIds };
+  }
+  // No <settings> root to anchor an insertion on (e.g. empty/malformed file)
+  // — leave xml untouched, same as the pre-synthesis no-op behavior.
+  return { xml, addedIds: [] };
 }
 
 /**
  * Writes a temp copy of the user's ~/.m2/settings.xml with the
- * anypoint-exchange-v3 <server> credential refreshed from the live CLI
- * session (or, when that session is empty, ACB's own acb_settings.xml).
- * Never mutates the real settings.xml.
+ * anypoint-exchange-v2 and anypoint-exchange-v3 <server> credentials
+ * refreshed from the live CLI session (or, when that session is empty,
+ * ACB's own acb_settings.xml) — refreshing existing blocks and adding
+ * whichever of the two is missing. Never mutates the real settings.xml.
  *
  * @param {{ sourcePath?: string, acbTempDir?: string }} [opts] sourcePath
  *   overrides ~/.m2/settings.xml, acbTempDir overrides
@@ -180,9 +230,10 @@ export function writeMavenSettings(opts = {}) {
     return { path: sourcePath, patched: false, credentialKind: null, warning: 'No Anypoint CLI session credentials found (anypoint-cli-v4 conf client_id/client_secret/token empty, and no acb_settings.xml session found); using settings.xml as-is.' };
   }
 
-  const { xml: patchedXml, found } = patchExchangeServer(xml, creds);
-  if (!found) {
-    return { path: sourcePath, patched: false, credentialKind: null, warning: `No <server><id>${EXCHANGE_SERVER_ID}</id> block found in ${sourcePath}; using settings.xml as-is.` };
+  const { xml: refreshedXml, foundIds } = patchExistingExchangeServers(xml, creds);
+  const { xml: patchedXml, addedIds } = addMissingExchangeServers(refreshedXml, creds, foundIds);
+  if (foundIds.size === 0 && addedIds.length === 0) {
+    return { path: sourcePath, patched: false, credentialKind: null, warning: `No <settings> root found in ${sourcePath} to add a <server><id>${EXCHANGE_SERVER_IDS.join('</id> or <id>')}</id> block to; using settings.xml as-is.` };
   }
 
   const dir = mkdtempSync(join(tmpdir(), 'upgrade-mule-app-mvn-settings-'));
