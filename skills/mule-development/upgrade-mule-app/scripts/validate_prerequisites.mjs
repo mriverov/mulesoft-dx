@@ -208,7 +208,7 @@ function main() {
   result.cliPresent = cli.ok;
   if (!cli.ok) {
     log("❌ anypoint-cli-v4 not found");
-    result.errors.push("anypoint-cli-v4 not found. Install: npm install -g anypoint-cli-v4");
+    result.errors.push("anypoint-cli-v4 not found. Install: npm install -g anypoint-cli-v4-public");
   } else {
     log("✅ anypoint-cli-v4 found");
     const dx = tryExec("anypoint-cli-v4", ["dx", "--help"]);
