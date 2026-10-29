@@ -26,7 +26,7 @@ import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { mkdirp, writeJson } from '../lib/fsx.mjs';
 import { sortVersionStrings } from '../lib/platform.mjs';
-import { anypointEnv } from '../lib/anypoint.mjs';
+import { anypointEnv, shellSafeArgs } from '../lib/anypoint.mjs';
 
 // -- usage ------------------------------------------------------------------
 
@@ -156,9 +156,11 @@ function buildChildEnv() {
 function describeOnce(gav) {
   const cmdArgs = ['dx', 'mule', 'describe-connector', '--connector', gav, '--output', 'json'];
   if (TYPE) cmdArgs.push('--type', TYPE, '--name', NAME);
-  return spawnSync('anypoint-cli-v4', cmdArgs, {
+  let safeArgs;
+  try { safeArgs = shellSafeArgs(cmdArgs); } catch (error) { return { error }; }
+  return spawnSync('anypoint-cli-v4', safeArgs, {
     env: buildChildEnv(),
-    shell: false,
+    shell: process.platform === 'win32',
     encoding: 'buffer',
     maxBuffer: Infinity,
   });
@@ -183,10 +185,14 @@ function tryPriorVersions(currentGav) {
 
   // List every published version of this asset (Exchange returns one row per
   // version).
+  let listArgs;
+  try {
+    listArgs = shellSafeArgs(['exchange', 'asset', 'list', assetId, '--limit', '200', '--offset', '0', '--output', 'json']);
+  } catch { return null; }
   const listing = spawnSync(
     'anypoint-cli-v4',
-    ['exchange', 'asset', 'list', assetId, '--limit', '200', '--offset', '0', '--output', 'json'],
-    { env: anypointEnv(), encoding: 'utf8', shell: false, maxBuffer: Infinity },
+    listArgs,
+    { env: anypointEnv(), encoding: 'utf8', shell: process.platform === 'win32', maxBuffer: Infinity },
   );
   if (listing.status !== 0 || !listing.stdout) return null;
 
