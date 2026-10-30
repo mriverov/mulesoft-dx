@@ -14,7 +14,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - **`upgrade-mule-app`** — Step 1 (`validate_prerequisites.mjs`) now spawns its `anypoint-cli-v4` / `mvn` probes with `shell: process.platform === 'win32'`. On Windows both resolve to `.cmd` shims that `spawnSync` cannot find by bare name without a shell, so every prerequisite check failed with `ENOENT` and reported the tools as missing. Behavior on macOS/Linux is unchanged.
 
-## [1.9.4] - Unreleased
+## [1.9.4]
 
 ### Added
 
@@ -24,7 +24,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - **`build-mule-integration`** — the helper scripts now spawn `anypoint-cli-v4` with `shell: process.platform === 'win32'` instead of `shell: false` (`lib/anypoint.mjs`, `describe_connector.mjs`, `get_latest_connector.mjs`, `search_templates.mjs`). On Windows the npm-installed CLI is a `.cmd` shim that cannot be launched without a shell, so every CLI call failed with `ENOENT`. Behavior on macOS/Linux is unchanged.
 
-## [1.9.3] - Unreleased
+## [1.9.3]
 
 ### Added
 
