@@ -4,20 +4,28 @@ import assert from 'node:assert/strict';
 import { readFileSync, writeFileSync, mkdirSync, mkdtempSync, rmSync, utimesSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { writeMavenSettings, looksLikeAuthFailure } from './maven-settings.mjs';
+import { writeMavenSettings, looksLikeAuthFailure, cleanupMavenSettings } from './maven-settings.mjs';
+import { existsSync } from 'node:fs';
 
 // These tests exercise the pure settings.xml patching path with a fixture
 // source file. They don't depend on a real anypoint-cli-v4 session, so they
 // stub readCredentials indirectly by pointing PATH at a fake `anypoint-cli-v4`
 // shell shim that prints deterministic conf values.
+// Shell-quote a value for safe embedding in the generated script below —
+// confValues can contain `"`, `$`, backticks, etc. (e.g. a JSON-stringified
+// token), and double-quoting without escaping lets those break out.
+function shQuote(s) {
+  return `'${String(s).replace(/'/g, `'\\''`)}'`;
+}
+
 function withFakeCli(confValues, fn) {
   const binDir = mkdtempSync(join(tmpdir(), 'fake-anypoint-cli-'));
   const script = `#!/bin/sh
 if [ "$1" = "conf" ]; then
   case "$2" in
-    client_id) printf '%s' "${confValues.client_id || ''}" ;;
-    client_secret) printf '%s' "${confValues.client_secret || ''}" ;;
-    token) printf '%s' "${confValues.token || ''}" ;;
+    client_id) printf '%s' ${shQuote(confValues.client_id || '')} ;;
+    client_secret) printf '%s' ${shQuote(confValues.client_secret || '')} ;;
+    token) printf '%s' ${shQuote(confValues.token || '')} ;;
     *) printf '' ;;
   esac
   exit 0
@@ -56,11 +64,14 @@ function fixtureSettings(dir) {
   return p;
 }
 
+// emptyAcbTempDir() is declared below (used by the ACB-fallback tests) —
+// hoisted here via function declaration, usable before its lexical position.
 test('writeMavenSettings refreshes only the anypoint-exchange-v3 server, leaves others untouched', () => {
   const dir = mkdtempSync(join(tmpdir(), 'maven-settings-fixture-'));
   const sourcePath = fixtureSettings(dir);
+  const acbTempDir = emptyAcbTempDir();
   withFakeCli({ token: 'fresh-session-token' }, () => {
-    const result = writeMavenSettings({ sourcePath });
+    const result = writeMavenSettings({ sourcePath, acbTempDir });
     assert.equal(result.patched, true);
     assert.equal(result.credentialKind, 'token');
     const out = readFileSync(result.path, 'utf8');
@@ -73,6 +84,7 @@ test('writeMavenSettings refreshes only the anypoint-exchange-v3 server, leaves 
     assert.doesNotMatch(out, /stale-expired-token/);
   });
   rmSync(dir, { recursive: true, force: true });
+  rmSync(acbTempDir, { recursive: true, force: true });
 });
 
 function fixtureSettingsV2Only(dir) {
@@ -123,8 +135,9 @@ function fixtureSettingsV2AndV3(dir) {
 test('writeMavenSettings refreshes a legacy anypoint-exchange-v2 server when v3 is absent', () => {
   const dir = mkdtempSync(join(tmpdir(), 'maven-settings-fixture-'));
   const sourcePath = fixtureSettingsV2Only(dir);
+  const acbTempDir = emptyAcbTempDir();
   withFakeCli({ token: 'fresh-session-token' }, () => {
-    const result = writeMavenSettings({ sourcePath });
+    const result = writeMavenSettings({ sourcePath, acbTempDir });
     assert.equal(result.patched, true);
     assert.equal(result.credentialKind, 'token');
     const out = readFileSync(result.path, 'utf8');
@@ -133,13 +146,15 @@ test('writeMavenSettings refreshes a legacy anypoint-exchange-v2 server when v3 
     assert.doesNotMatch(out, /stale-expired-token/);
   });
   rmSync(dir, { recursive: true, force: true });
+  rmSync(acbTempDir, { recursive: true, force: true });
 });
 
 test('writeMavenSettings refreshes both anypoint-exchange-v2 and anypoint-exchange-v3 when both are present', () => {
   const dir = mkdtempSync(join(tmpdir(), 'maven-settings-fixture-'));
   const sourcePath = fixtureSettingsV2AndV3(dir);
+  const acbTempDir = emptyAcbTempDir();
   withFakeCli({ token: 'fresh-session-token' }, () => {
-    const result = writeMavenSettings({ sourcePath });
+    const result = writeMavenSettings({ sourcePath, acbTempDir });
     assert.equal(result.patched, true);
     const out = readFileSync(result.path, 'utf8');
     const matches = out.match(/<password>fresh-session-token<\/password>/g) || [];
@@ -147,19 +162,89 @@ test('writeMavenSettings refreshes both anypoint-exchange-v2 and anypoint-exchan
     assert.doesNotMatch(out, /stale-expired-token/);
   });
   rmSync(dir, { recursive: true, force: true });
+  rmSync(acbTempDir, { recursive: true, force: true });
 });
 
 test('writeMavenSettings prefers a Connected App over a bearer token', () => {
   const dir = mkdtempSync(join(tmpdir(), 'maven-settings-fixture-'));
   const sourcePath = fixtureSettings(dir);
+  const acbTempDir = emptyAcbTempDir();
   withFakeCli({ client_id: 'abc', client_secret: 'def', token: 'should-not-be-used' }, () => {
-    const result = writeMavenSettings({ sourcePath });
+    const result = writeMavenSettings({ sourcePath, acbTempDir });
     assert.equal(result.credentialKind, 'client');
     const out = readFileSync(result.path, 'utf8');
     assert.match(out, /<username>~~~Client~~~<\/username>/);
     assert.match(out, /<password>abc~\?~def<\/password>/);
   });
   rmSync(dir, { recursive: true, force: true });
+  rmSync(acbTempDir, { recursive: true, force: true });
+});
+
+test('writeMavenSettings unwraps a JSON-object-shaped token from `anypoint-cli-v4 conf token`', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'maven-settings-fixture-'));
+  const sourcePath = fixtureSettings(dir);
+  const acbTempDir = emptyAcbTempDir();
+  withFakeCli({ token: JSON.stringify({ token: 'wrapped-session-token' }) }, () => {
+    const result = writeMavenSettings({ sourcePath, acbTempDir });
+    assert.equal(result.credentialKind, 'token');
+    const out = readFileSync(result.path, 'utf8');
+    assert.match(out, /<password>wrapped-session-token<\/password>/);
+  });
+  rmSync(dir, { recursive: true, force: true });
+  rmSync(acbTempDir, { recursive: true, force: true });
+});
+
+test('writeMavenSettings XML-escapes a credential value and is immune to $-pattern replacement expansion', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'maven-settings-fixture-'));
+  const sourcePath = fixtureSettings(dir);
+  const acbTempDir = emptyAcbTempDir();
+  // A token containing both an XML-special character and a String.replace
+  // special pattern ($&) — a naive implementation would either corrupt the
+  // XML or expand $& into the full matched substring. (No literal double
+  // quote here: this value also has to survive the fake CLI's own shell
+  // script, which wraps it in double quotes.)
+  withFakeCli({ token: `wei<rd&'$&token` }, () => {
+    const result = writeMavenSettings({ sourcePath, acbTempDir });
+    const out = readFileSync(result.path, 'utf8');
+    assert.match(out, /<password>wei&lt;rd&amp;&apos;\$&amp;token<\/password>/);
+  });
+  rmSync(dir, { recursive: true, force: true });
+  rmSync(acbTempDir, { recursive: true, force: true });
+});
+
+test('writeMavenSettings does not treat a commented-out anypoint-exchange-v3 block as live', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'maven-settings-fixture-'));
+  const sourcePath = join(dir, 'settings.xml');
+  writeFileSync(sourcePath, `<settings>
+  <servers>
+    <!--
+    <server>
+      <id>anypoint-exchange-v3</id>
+      <username>disabled-user</username>
+      <password>disabled-password</password>
+    </server>
+    -->
+    <server>
+      <id>nexus3</id>
+      <username>marinarivero</username>
+      <password>unrelated-nexus-secret</password>
+    </server>
+  </servers>
+</settings>
+`);
+  const acbTempDir = emptyAcbTempDir();
+  withFakeCli({ token: 'fresh-session-token' }, () => {
+    const result = writeMavenSettings({ sourcePath, acbTempDir });
+    assert.equal(result.patched, true);
+    const out = readFileSync(result.path, 'utf8');
+    // The commented block is left byte-for-byte alone...
+    assert.match(out, /<!--\s*\n\s*<server>\s*\n\s*<id>anypoint-exchange-v3<\/id>\s*\n\s*<username>disabled-user<\/username>\s*\n\s*<password>disabled-password<\/password>/);
+    // ...and a brand-new, real block was added instead of being skipped.
+    const matches = out.match(/<password>fresh-session-token<\/password>/g) || [];
+    assert.equal(matches.length, 2);
+  });
+  rmSync(dir, { recursive: true, force: true });
+  rmSync(acbTempDir, { recursive: true, force: true });
 });
 
 // No acbTempDir override here is deliberately wrong — a real ACB install can
@@ -308,11 +393,35 @@ test('writeMavenSettings is a no-op when the source settings.xml has no <setting
   rmSync(dir, { recursive: true, force: true });
 });
 
-test('writeMavenSettings is a no-op when the source file does not exist', () => {
+test('writeMavenSettings returns path: null (not the nonexistent path) when the source file does not exist', () => {
   const result = writeMavenSettings({ sourcePath: '/nonexistent/path/settings.xml' });
   assert.equal(result.patched, false);
-  assert.equal(result.path, '/nonexistent/path/settings.xml');
+  assert.equal(result.path, null);
   assert.ok(result.warning);
+});
+
+test('cleanupMavenSettings removes a temp settings dir writeMavenSettings created', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'maven-settings-fixture-'));
+  const sourcePath = fixtureSettings(dir);
+  const acbTempDir = emptyAcbTempDir();
+  withFakeCli({ token: 'fresh-session-token' }, () => {
+    const result = writeMavenSettings({ sourcePath, acbTempDir });
+    assert.ok(existsSync(result.path));
+    cleanupMavenSettings(result.path);
+    assert.equal(existsSync(result.path), false);
+  });
+  rmSync(dir, { recursive: true, force: true });
+  rmSync(acbTempDir, { recursive: true, force: true });
+});
+
+test('cleanupMavenSettings is a no-op for a path it did not create (real settings.xml, or null)', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'maven-settings-fixture-'));
+  const sourcePath = fixtureSettings(dir);
+  cleanupMavenSettings(sourcePath);
+  assert.ok(existsSync(sourcePath)); // still there — not a dir this function created
+  cleanupMavenSettings(null);
+  cleanupMavenSettings(undefined);
+  rmSync(dir, { recursive: true, force: true });
 });
 
 test('looksLikeAuthFailure detects common Maven 401/Unauthorized phrasings', () => {
@@ -330,4 +439,15 @@ test('looksLikeAuthFailure does not flag an unrelated build failure', () => {
   ), false);
   assert.equal(looksLikeAuthFailure(''), false);
   assert.equal(looksLikeAuthFailure(undefined), false);
+});
+
+test('looksLikeAuthFailure does not flag a bare 401/Unauthorized that appears in unrelated Maven output', () => {
+  // A download-speed log line that happens to contain "401" (kB), not a 401 response.
+  assert.equal(looksLikeAuthFailure(
+    'Downloaded from central: https://repo.maven.apache.org/maven2/.../foo-1.2.3.jar (401 kB at 2.0 MB/s)'
+  ), false);
+  // An XSD validation error citing a line/column of 401 — nothing to do with auth.
+  assert.equal(looksLikeAuthFailure(
+    "[ERROR] flows.xml:[401,25] cvc-elt.1.a: Cannot find the declaration of element 'flow'."
+  ), false);
 });

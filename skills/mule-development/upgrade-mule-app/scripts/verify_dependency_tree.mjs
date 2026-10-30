@@ -55,7 +55,7 @@
 import { readFileSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { dirname, resolve, join } from "node:path";
-import { writeMavenSettings, looksLikeAuthFailure } from "../lib/maven-settings.mjs";
+import { writeMavenSettings, looksLikeAuthFailure, cleanupMavenSettings } from "../lib/maven-settings.mjs";
 
 // Don't crash if a downstream consumer (e.g. `head`) closes stdout early.
 process.stdout.on("error", (e) => { if (e.code === "EPIPE") process.exit(0); });
@@ -122,7 +122,7 @@ function runTree(projectDir, includesCsv, settingsPath) {
     "mvn",
     [
       "-B", // batch mode: no ANSI, stable output
-      "-s", settingsPath,
+      ...(settingsPath ? ["-s", settingsPath] : []),
       "dependency:tree",
       `-Dincludes=${includesCsv}`,
       "-DoutputType=text",
@@ -209,6 +209,7 @@ function main() {
 
   log(`Resolving dependency tree in ${projectDir} (mode: ${mode})...`);
   const tree = runTree(projectDir, includesCsv, settings.path);
+  cleanupMavenSettings(settings.path); // mvn already read it; don't leave a plaintext credential in /tmp
   if (!tree.ok) {
     result.buildOk = false;
     if (looksLikeAuthFailure(tree.out)) {

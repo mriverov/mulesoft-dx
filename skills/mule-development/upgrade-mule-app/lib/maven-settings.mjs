@@ -23,11 +23,16 @@
 // calls always run inside the target app directory, where the app's own
 // pom.xml already declares whichever anypoint-exchange-v2/v3 <repository>
 // id/URL it needs; only the matching credential is this function's job.
-import { readFileSync, writeFileSync, mkdtempSync, existsSync, readdirSync, statSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdtempSync, existsSync, readdirSync, statSync, rmSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, dirname, basename } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { anypointEnv } from './anypoint.mjs';
+
+// mkdtempSync prefix for the temp settings.xml dir created below — also the
+// signature cleanupMavenSettings() checks for before deleting anything, so
+// it can never be tricked into rm -rf'ing an unrelated directory.
+const TEMP_DIR_PREFIX = 'upgrade-mule-app-mvn-settings-';
 
 // v3 is preferred when both are present in a credential-lookup context (e.g.
 // borrowing a representative credential from ACB's acb_settings.xml) since
@@ -49,7 +54,14 @@ const EXCHANGE_SERVER_IDS = ['anypoint-exchange-v3', 'anypoint-exchange-v2'];
 const ACB_TEMP_DIR_DEFAULT = join(homedir(), 'AnypointCodeBuilder', '.tmp');
 
 // Same precedence as the plugin: a static Connected App beats the short-lived
-// session bearer token.
+// session bearer token, which in turn beats the ACB fallback below — even
+// though a CLI token can itself be stale (expired/revoked) while ACB's own
+// session is still fresh. `anypoint-cli-v4 conf token` doesn't expose an
+// expiry timestamp we can check locally, so there's no reliable signal here
+// to prefer ACB over a present-but-maybe-dead CLI token. In practice this
+// only matters when the CLI session is stale AND ACB's is not: the dead-CLI-
+// token case still surfaces correctly via looksLikeAuthFailure() -> "ask to
+// re-login" at the point mvn actually tries to use it.
 function readConfValue(key) {
   const r = spawnSync('anypoint-cli-v4', ['conf', key], { env: anypointEnv(), encoding: 'utf8', timeout: 10_000 });
   if (r.status !== 0) return '';
@@ -70,13 +82,45 @@ function unwrapToken(raw) {
   return raw;
 }
 
+// XML-escape a credential value before interpolating it into a <username>/
+// <password> text node — CLI/ACB-sourced values pass through untouched
+// otherwise, and could contain &, <, >, or quote characters.
+function escapeXml(value) {
+  return String(value)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&apos;');
+}
+
+// Byte ranges of every <!-- ... --> comment in xml, so matches inside them
+// can be skipped below — a commented-out <server> block (e.g. a customer
+// who disabled a stale entry by hand) must not be treated as a live one.
+function findCommentRanges(xml) {
+  const ranges = [];
+  const commentRe = /<!--[\s\S]*?-->/g;
+  let m;
+  while ((m = commentRe.exec(xml)) !== null) {
+    ranges.push([m.index, m.index + m[0].length]);
+  }
+  return ranges;
+}
+
+function isInsideAnyRange(ranges, index) {
+  return ranges.some(([start, end]) => index >= start && index < end);
+}
+
 // Find the <server> block whose <id> is one of EXCHANGE_SERVER_IDS, trying
-// each id in order. Returns the matched block text, or null.
+// each id in order. Returns the matched block text, or null. Blocks inside
+// an XML comment are ignored — see findCommentRanges().
 function findExchangeServerBlock(xml) {
+  const commentRanges = findCommentRanges(xml);
   const serverRe = /<server\b[^>]*>[\s\S]*?<\/server>/g;
   const blocksById = new Map();
   let m;
   while ((m = serverRe.exec(xml)) !== null) {
+    if (isInsideAnyRange(commentRanges, m.index)) continue;
     const idMatch = /<id>\s*([^<]*?)\s*<\/id>/.exec(m[0]);
     if (idMatch) blocksById.set(idMatch[1], m[0]);
   }
@@ -104,6 +148,12 @@ function extractExchangeServerCredential(xml) {
 // from whichever one was modified most recently — ACB refreshes the file on
 // a timer while its backend is running, so recency is the best signal for
 // "the currently active session" without knowing the backend's actual PID.
+// Trade-off: a crashed backend's directory could in principle be the most
+// recently *written* one and win over a live backend that hasn't rewritten
+// its file yet since the crash — accepted here since this is already a
+// fallback path (CLI session empty) and a stale ACB credential surfaces the
+// same way any other stale one does, via looksLikeAuthFailure() at the mvn
+// call site.
 function readAcbSettingsCredentials(acbTempDir) {
   if (!existsSync(acbTempDir)) return null;
   let entries;
@@ -149,22 +199,35 @@ function readCredentials(opts) {
 // Replace <username>/<password> inside every EXISTING <server> block whose
 // <id> is in EXCHANGE_SERVER_IDS. Tolerant of child-element order and
 // whitespace; every other <server>/<profile>/<mirror> in the file is left
-// byte-for-byte untouched. Returns { xml, foundIds } where foundIds is the
-// set of EXCHANGE_SERVER_IDS that already had a block (and got refreshed).
+// byte-for-byte untouched. A block inside an XML comment is left alone and
+// does NOT count as "found" — a commented-out entry is not live. Returns
+// { xml, foundIds } where foundIds is the set of EXCHANGE_SERVER_IDS that
+// already had a (non-commented) block (and got refreshed).
+//
+// Every `.replace(regex, replacementString)` below uses a function as the
+// replacement (even where it doesn't need to compute anything) rather than
+// a plain string — a plain-string replacement is subject to String.replace's
+// special `$&`/`$1`/`$$` pattern expansion, and creds.username/password are
+// untrusted (CLI- or ACB-sourced) values that could coincidentally contain
+// `$`. A function's return value is always inserted literally.
 function patchExistingExchangeServers(xml, creds) {
+  const commentRanges = findCommentRanges(xml);
   const serverRe = /<server\b[^>]*>[\s\S]*?<\/server>/g;
   const foundIds = new Set();
-  const patched = xml.replace(serverRe, (block) => {
+  const username = escapeXml(creds.username);
+  const password = escapeXml(creds.password);
+  const patched = xml.replace(serverRe, (block, offset) => {
+    if (isInsideAnyRange(commentRanges, offset)) return block;
     const idMatch = /<id>\s*([^<]*?)\s*<\/id>/.exec(block);
     if (!idMatch || !EXCHANGE_SERVER_IDS.includes(idMatch[1])) return block;
     foundIds.add(idMatch[1]);
     let next = block;
     next = /<username>[\s\S]*?<\/username>/.test(next)
-      ? next.replace(/<username>[\s\S]*?<\/username>/, `<username>${creds.username}</username>`)
-      : next.replace(/<\/server>/, `  <username>${creds.username}</username>\n</server>`);
+      ? next.replace(/<username>[\s\S]*?<\/username>/, () => `<username>${username}</username>`)
+      : next.replace(/<\/server>/, () => `  <username>${username}</username>\n</server>`);
     next = /<password>[\s\S]*?<\/password>/.test(next)
-      ? next.replace(/<password>[\s\S]*?<\/password>/, `<password>${creds.password}</password>`)
-      : next.replace(/<\/server>/, `  <password>${creds.password}</password>\n</server>`);
+      ? next.replace(/<password>[\s\S]*?<\/password>/, () => `<password>${password}</password>`)
+      : next.replace(/<\/server>/, () => `  <password>${password}</password>\n</server>`);
     return next;
   });
   return { xml: patched, foundIds };
@@ -184,15 +247,21 @@ function addMissingExchangeServers(xml, creds, foundIds) {
   const missingIds = EXCHANGE_SERVER_IDS.filter((id) => !foundIds.has(id));
   if (missingIds.length === 0) return { xml, addedIds: [] };
 
+  const username = escapeXml(creds.username);
+  const password = escapeXml(creds.password);
+  // credential values are already XML-escaped above, so the only remaining
+  // $-expansion risk is String.replace's own special pattern handling in
+  // the two `.replace(regex, newBlocks)` calls below — both use a function
+  // replacement to avoid it (same reasoning as patchExistingExchangeServers).
   const newBlocks = missingIds
-    .map((id) => `    <server>\n      <id>${id}</id>\n      <username>${creds.username}</username>\n      <password>${creds.password}</password>\n    </server>\n`)
+    .map((id) => `    <server>\n      <id>${id}</id>\n      <username>${username}</username>\n      <password>${password}</password>\n    </server>\n`)
     .join('');
 
   if (/<servers>[\s\S]*?<\/servers>/.test(xml)) {
-    return { xml: xml.replace(/<\/servers>/, `${newBlocks}  </servers>`), addedIds: missingIds };
+    return { xml: xml.replace(/<\/servers>/, () => `${newBlocks}  </servers>`), addedIds: missingIds };
   }
   if (/<servers\s*\/>/.test(xml)) {
-    return { xml: xml.replace(/<servers\s*\/>/, `<servers>\n${newBlocks}  </servers>`), addedIds: missingIds };
+    return { xml: xml.replace(/<servers\s*\/>/, () => `<servers>\n${newBlocks}  </servers>`), addedIds: missingIds };
   }
   if (/<settings\b[^>]*>/.test(xml)) {
     return { xml: xml.replace(/<settings\b[^>]*>/, (tag) => `${tag}\n  <servers>\n${newBlocks}  </servers>`), addedIds: missingIds };
@@ -212,16 +281,20 @@ function addMissingExchangeServers(xml, creds, foundIds) {
  * @param {{ sourcePath?: string, acbTempDir?: string }} [opts] sourcePath
  *   overrides ~/.m2/settings.xml, acbTempDir overrides
  *   ~/AnypointCodeBuilder/.tmp (for tests).
- * @returns {{ path: string, patched: boolean, credentialKind: 'client'|'token'|'acb'|null, warning?: string }}
- *   path is always usable with `mvn -s <path>` — when nothing could be
- *   patched, path points at an unmodified copy of the source (or the source
- *   itself, if there is no source) so the caller can pass -s unconditionally.
+ * @returns {{ path: string|null, patched: boolean, credentialKind: 'client'|'token'|'acb'|null, warning?: string }}
+ *   path is null when sourcePath does not exist — there is nothing to pass
+ *   to `mvn -s` in that case, so callers MUST omit `-s` rather than pass a
+ *   nonexistent path (`mvn -s /nonexistent/settings.xml` hard-fails with
+ *   "The specified user settings file does not exist"), e.g.
+ *   `${MVN_SETTINGS:+-s "$MVN_SETTINGS"}`. Whenever a source file DOES
+ *   exist, path is always non-null and safe to pass to `mvn -s <path>`,
+ *   whether or not anything was patched.
  */
 export function writeMavenSettings(opts = {}) {
   const sourcePath = opts.sourcePath || join(homedir(), '.m2', 'settings.xml');
 
   if (!existsSync(sourcePath)) {
-    return { path: sourcePath, patched: false, credentialKind: null, warning: `${sourcePath} not found; mvn will run with no custom settings.` };
+    return { path: null, patched: false, credentialKind: null, warning: `${sourcePath} not found; mvn will run with no custom settings.` };
   }
 
   const creds = readCredentials(opts);
@@ -236,10 +309,34 @@ export function writeMavenSettings(opts = {}) {
     return { path: sourcePath, patched: false, credentialKind: null, warning: `No <settings> root found in ${sourcePath} to add a <server><id>${EXCHANGE_SERVER_IDS.join('</id> or <id>')}</id> block to; using settings.xml as-is.` };
   }
 
-  const dir = mkdtempSync(join(tmpdir(), 'upgrade-mule-app-mvn-settings-'));
+  const dir = mkdtempSync(join(tmpdir(), TEMP_DIR_PREFIX));
   const outPath = join(dir, 'settings.xml');
   writeFileSync(outPath, patchedXml, { mode: 0o600 });
   return { path: outPath, patched: true, credentialKind: creds.kind };
+}
+
+/**
+ * Deletes the temp dir writeMavenSettings() created for `path`, once mvn is
+ * done reading it — the written file holds a plaintext bearer token/client
+ * secret, and nothing else ever removes it. Safe to call with ANY path,
+ * including null or the real ~/.m2/settings.xml (the `patched: false`
+ * case): this only ever deletes a directory under os.tmpdir() whose name
+ * has the exact mkdtempSync prefix writeMavenSettings() uses, so it can
+ * never reach the user's real settings.xml or any other directory.
+ *
+ * @param {string|null|undefined} path the `path` field from a
+ *   writeMavenSettings() result.
+ */
+export function cleanupMavenSettings(path) {
+  if (!path) return;
+  const dir = dirname(path);
+  if (dirname(dir) !== tmpdir()) return;
+  if (!basename(dir).startsWith(TEMP_DIR_PREFIX)) return;
+  try {
+    rmSync(dir, { recursive: true, force: true });
+  } catch {
+    // Best-effort cleanup only — a failure here must never fail the caller.
+  }
 }
 
 // writeMavenSettings() can only forward whatever credential the live CLI
@@ -248,8 +345,15 @@ export function writeMavenSettings(opts = {}) {
 // SESSION, not a build defect: no code edit will fix it, and the Step 16/17
 // retry classifiers must not burn a retry guessing at one. This is the
 // signal callers check to route to "ask the user to re-login" instead.
+//
+// Deliberately contextual, not bare `\b401\b` / `\bUnauthorized\b` — those
+// false-positive on ordinary Maven output that happens to contain the
+// number or word (a download-speed log like "(401 kB at 2.0 MB/s)", or an
+// XSD line/column reference like "flows.xml:[401,25]"), which would
+// misroute a real code/XSD defect to the auth-failure path instead of the
+// Step 16 code-fix classifier.
 const AUTH_FAILURE_RE =
-  /\b401\b|status code:\s*401|ReasonPhrase:\s*Unauthorized|Not authorized to access|\bUnauthorized\b/i;
+  /status code:\s*401|ReasonPhrase:\s*Unauthorized|Not authorized to access|\b401\s+Unauthorized\b/i;
 
 /**
  * @param {string} mvnOutput combined stdout+stderr from a failed mvn run.
