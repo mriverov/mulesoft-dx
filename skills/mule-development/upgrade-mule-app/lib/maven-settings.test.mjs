@@ -393,11 +393,45 @@ test('writeMavenSettings is a no-op when the source settings.xml has no <setting
   rmSync(dir, { recursive: true, force: true });
 });
 
-test('writeMavenSettings returns path: null (not the nonexistent path) when the source file does not exist', () => {
-  const result = writeMavenSettings({ sourcePath: '/nonexistent/path/settings.xml' });
-  assert.equal(result.patched, false);
-  assert.equal(result.path, null);
-  assert.ok(result.warning);
+test('writeMavenSettings returns path: null when the source file does not exist AND no credential is found', () => {
+  const acbTempDir = emptyAcbTempDir();
+  withFakeCli({}, () => {
+    const result = writeMavenSettings({ sourcePath: '/nonexistent/path/settings.xml', acbTempDir });
+    assert.equal(result.patched, false);
+    assert.equal(result.path, null);
+    assert.ok(result.warning);
+  });
+  rmSync(acbTempDir, { recursive: true, force: true });
+});
+
+test('writeMavenSettings synthesizes a brand-new settings.xml from a CLI token when the source file does not exist', () => {
+  const acbTempDir = emptyAcbTempDir();
+  withFakeCli({ token: 'fresh-session-token' }, () => {
+    const result = writeMavenSettings({ sourcePath: '/nonexistent/path/settings.xml', acbTempDir });
+    assert.ok(result.path);
+    assert.equal(result.patched, true);
+    assert.equal(result.credentialKind, 'token');
+    const out = readFileSync(result.path, 'utf8');
+    assert.match(out, /<id>anypoint-exchange-v3<\/id>/);
+    assert.match(out, /<password>fresh-session-token<\/password>/);
+    cleanupMavenSettings(result.path);
+  });
+  rmSync(acbTempDir, { recursive: true, force: true });
+});
+
+test('writeMavenSettings synthesizes a brand-new settings.xml from ACB session when the source file does not exist and the CLI has none', () => {
+  const acbTempDir = emptyAcbTempDir();
+  writeAcbSettingsFixture(acbTempDir, '12345', '~~~Token~~~', 'acb-live-session-token');
+  withFakeCli({}, () => {
+    const result = writeMavenSettings({ sourcePath: '/nonexistent/path/settings.xml', acbTempDir });
+    assert.ok(result.path);
+    assert.equal(result.patched, true);
+    assert.equal(result.credentialKind, 'acb');
+    const out = readFileSync(result.path, 'utf8');
+    assert.match(out, /<password>acb-live-session-token<\/password>/);
+    cleanupMavenSettings(result.path);
+  });
+  rmSync(acbTempDir, { recursive: true, force: true });
 });
 
 test('cleanupMavenSettings removes a temp settings dir writeMavenSettings created', () => {

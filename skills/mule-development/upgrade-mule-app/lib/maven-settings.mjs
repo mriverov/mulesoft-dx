@@ -282,22 +282,44 @@ function addMissingExchangeServers(xml, creds, foundIds) {
  *   overrides ~/.m2/settings.xml, acbTempDir overrides
  *   ~/AnypointCodeBuilder/.tmp (for tests).
  * @returns {{ path: string|null, patched: boolean, credentialKind: 'client'|'token'|'acb'|null, warning?: string }}
- *   path is null when sourcePath does not exist — there is nothing to pass
- *   to `mvn -s` in that case, so callers MUST omit `-s` rather than pass a
- *   nonexistent path (`mvn -s /nonexistent/settings.xml` hard-fails with
- *   "The specified user settings file does not exist"), e.g.
- *   `${MVN_SETTINGS:+-s "$MVN_SETTINGS"}`. Whenever a source file DOES
- *   exist, path is always non-null and safe to pass to `mvn -s <path>`,
- *   whether or not anything was patched.
+ *   path is null only when sourcePath does not exist AND no CLI/ACB
+ *   credential was found — there is nothing to pass to `mvn -s` in that
+ *   case, so callers MUST omit `-s` rather than pass a nonexistent path
+ *   (`mvn -s /nonexistent/settings.xml` hard-fails with "The specified
+ *   user settings file does not exist"), e.g.
+ *   `${MVN_SETTINGS:+-s "$MVN_SETTINGS"}`. When sourcePath does not exist
+ *   but a credential IS found (CLI or ACB), a brand-new minimal
+ *   settings.xml is synthesized in the temp copy — path is non-null in
+ *   that case too. Whenever a source file DOES exist, path is always
+ *   non-null and safe to pass to `mvn -s <path>`, whether or not anything
+ *   was patched.
  */
 export function writeMavenSettings(opts = {}) {
   const sourcePath = opts.sourcePath || join(homedir(), '.m2', 'settings.xml');
 
+  // Resolve credentials BEFORE checking whether sourcePath exists. A missing
+  // ~/.m2/settings.xml is common for a first build on a machine (Maven
+  // creates it lazily) and must not short-circuit past an active CLI/ACB
+  // session — synthesize a minimal settings.xml from scratch in that case
+  // rather than giving up with path: null while a live credential sits
+  // unused.
+  const creds = readCredentials(opts);
+
   if (!existsSync(sourcePath)) {
-    return { path: null, patched: false, credentialKind: null, warning: `${sourcePath} not found; mvn will run with no custom settings.` };
+    if (!creds) {
+      return { path: null, patched: false, credentialKind: null, warning: `${sourcePath} not found and no Anypoint CLI/ACB session credentials found; mvn will run with no custom settings.` };
+    }
+    const { xml: patchedXml, addedIds } = addMissingExchangeServers(
+      '<settings>\n  <servers>\n  </servers>\n</settings>\n',
+      creds,
+      new Set()
+    );
+    const dir = mkdtempSync(join(tmpdir(), TEMP_DIR_PREFIX));
+    const outPath = join(dir, 'settings.xml');
+    writeFileSync(outPath, patchedXml, { mode: 0o600 });
+    return { path: outPath, patched: addedIds.length > 0, credentialKind: creds.kind };
   }
 
-  const creds = readCredentials(opts);
   const xml = readFileSync(sourcePath, 'utf8');
   if (!creds) {
     return { path: sourcePath, patched: false, credentialKind: null, warning: 'No Anypoint CLI session credentials found (anypoint-cli-v4 conf client_id/client_secret/token empty, and no acb_settings.xml session found); using settings.xml as-is.' };
