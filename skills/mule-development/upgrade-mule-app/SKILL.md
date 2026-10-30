@@ -279,7 +279,7 @@ echo "latest MMP: $MMP"   # this is <latest-4.x> below
 Then apply it for the baseline build only. Every `mvn` invocation below is prefixed by refreshing the Exchange session credential Maven will authenticate with — `~/.m2/settings.xml`'s `anypoint-exchange-v2`/`anypoint-exchange-v3` entries go stale independently of the DX plugin's own auth (that's a *different* Maven invocation, inside the `describe-connector` subprocess — see `lib/anypoint.mjs`); this one is the skill's own `mvn` process and needs its own refresh:
 
 ```bash
-MVN_SETTINGS=$(node scripts/write_maven_settings.mjs | jq -r .path)
+MVN_SETTINGS=$(node scripts/write_maven_settings.mjs | jq -r '.path // empty')
 ```
 
 Two cases, by how the pom pins the plugin version:
@@ -1348,7 +1348,7 @@ Use metadata from `describe-connector` to ensure operations, configs, and attrib
 
 Bounded recovery loop with a **5-retry** cap. `mvn clean package -DskipTests` BUILD SUCCESS is packaging-only — it validates that (a) XSDs parse, (b) DataWeave compiles, (c) the `.jar` packages. It does NOT execute any flow, hit any external system, or run MUnit. Step 17 (`mvn test`) is the real runtime gate.
 
-- Refresh the Exchange session credential first (each `Bash` call is a fresh shell, so this is re-run every retry too): `MVN_SETTINGS=$(node scripts/write_maven_settings.mjs | jq -r .path)`
+- Refresh the Exchange session credential first (each `Bash` call is a fresh shell, so this is re-run every retry too): `MVN_SETTINGS=$(node scripts/write_maven_settings.mjs | jq -r '.path // empty')`
 - Run `JAVA_HOME=$(jq -r .javaHome tmp/resolve-jdk-<target-java>.json) mvn ${MVN_SETTINGS:+-s "$MVN_SETTINGS"} clean package -DskipTests 2>&1 | tee tmp/mvn-failures/build-<attempt>.log` — set `JAVA_HOME` inline to the target JDK (each `Bash` call is a fresh shell; an earlier `export` does not carry over). Immediately after, run `node scripts/cleanup_maven_settings.mjs "$MVN_SETTINGS"` to remove the temp credential file.
 - If BUILD SUCCESS → advance to Step 17.
 - If BUILD FAILURE → **do not ad-hoc patch.** Enter the classifier below (16.1). Almost every mvn failure is an XSD/DSL mismatch whose fix is already in the metadata collected during Plan Phase (Mode-A / Mode-B / Mode-C JSON) — structured recovery reuses that data instead of re-guessing. Apply **one** targeted edit, then re-run `mvn` in a NEW response.
@@ -1394,7 +1394,7 @@ Meaning: the flow XML calls an op that the *resolved* XSD doesn't declare. The p
 
 Before editing anything, run:
 ```bash
-MVN_SETTINGS=$(node scripts/write_maven_settings.mjs | jq -r .path)
+MVN_SETTINGS=$(node scripts/write_maven_settings.mjs | jq -r '.path // empty')
 mvn ${MVN_SETTINGS:+-s "$MVN_SETTINGS"} dependency:tree -Dincludes=<groupId>:<artifactId> 2>&1 | tail -20
 node scripts/cleanup_maven_settings.mjs "$MVN_SETTINGS"
 ```
@@ -1407,7 +1407,7 @@ Symptom: `java.lang.ClassCastException: class java.lang.String cannot be cast to
 
 Before editing anything, re-run with debug and grep for the failure frame + bean context:
 ```bash
-MVN_SETTINGS=$(node scripts/write_maven_settings.mjs | jq -r .path)
+MVN_SETTINGS=$(node scripts/write_maven_settings.mjs | jq -r '.path // empty')
 mvn ${MVN_SETTINGS:+-s "$MVN_SETTINGS"} clean package -DskipTests -X 2>&1 | grep -B 20 -A 3 'ClassCastException\|NullPointerException' \
   | tee tmp/mvn-failures/build-<attempt>-debug.log
 node scripts/cleanup_maven_settings.mjs "$MVN_SETTINGS"
@@ -1467,7 +1467,7 @@ MUnit failures classify against the same Mode-B `.attributes[] / .childElements[
 
 Do NOT attempt a 7th retry without user direction. Treat repeated failures as a signal that the plan missed a Mode-B / Mode-C detail, not as noise to retry through.
 
-- Refresh the Exchange session credential first: `MVN_SETTINGS=$(node scripts/write_maven_settings.mjs | jq -r .path)`
+- Refresh the Exchange session credential first: `MVN_SETTINGS=$(node scripts/write_maven_settings.mjs | jq -r '.path // empty')`
 - Run `JAVA_HOME=$(jq -r .javaHome tmp/resolve-jdk-<target-java>.json) mvn ${MVN_SETTINGS:+-s "$MVN_SETTINGS"} clean test` — pin the MUnit run to the resolved target JDK inline, same as Steps 3c and 16
 - Confirm the `MUnit Run Summary` shows `Tests run: N (>= 1)`, `Failed: 0`, `Errors: 0` — `BUILD SUCCESS` alone is not a pass
 - Run `node scripts/cleanup_maven_settings.mjs "$MVN_SETTINGS"` to remove the plaintext credential from /tmp
@@ -1509,7 +1509,7 @@ Prints a short summary; the full result is written to `tmp/parent-pom-fork.json`
 **Confirm with a re-build.** The fork is the workflow's **last file mutation**, and the script's link-check is a *static* verify (it confirms each downstream `<parent><version>` points at the fork), not a compile. Since every other mutating step ends in a build gate, close this one too — re-run the build once, pinned to the target JDK exactly as in Step 16, and require `BUILD SUCCESS` before cleanup:
 
 ```bash
-MVN_SETTINGS=$(node scripts/write_maven_settings.mjs | jq -r .path)
+MVN_SETTINGS=$(node scripts/write_maven_settings.mjs | jq -r '.path // empty')
 JAVA_HOME=$(jq -r .javaHome tmp/resolve-jdk-<target-java>.json) mvn ${MVN_SETTINGS:+-s "$MVN_SETTINGS"} clean package
 node scripts/cleanup_maven_settings.mjs "$MVN_SETTINGS"
 ```
@@ -1610,7 +1610,7 @@ node <skill-dir>/scripts/resolve_jdk.mjs <current-java-major> .
 node <skill-dir>/scripts/detect_current_mmp_version.mjs .
 
 # Step 3c — baseline build on the resolved JAVA_HOME (must be BUILD SUCCESS)
-MVN_SETTINGS=$(node <skill-dir>/scripts/write_maven_settings.mjs | jq -r .path)
+MVN_SETTINGS=$(node <skill-dir>/scripts/write_maven_settings.mjs | jq -r '.path // empty')
 JAVA_HOME=$(jq -r .javaHome tmp/resolve-jdk-<major>.json) mvn ${MVN_SETTINGS:+-s "$MVN_SETTINGS"} clean package
 node <skill-dir>/scripts/cleanup_maven_settings.mjs "$MVN_SETTINGS"
 
