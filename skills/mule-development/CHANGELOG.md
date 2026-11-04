@@ -4,6 +4,13 @@ All notable changes to `@salesforce/mulesoft-vibes-skills` are documented in thi
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.9.6] - Unreleased
+
+### Fixed
+
+- **`upgrade-mule-app`** — Step 1 now fails fast when there is no Anypoint session (no `anypoint-cli-v4` credential and no Anypoint Code Builder `acb_settings.xml`), telling the user to run `anypoint-cli-v4 login` instead of letting later CLI and Maven calls fail opaquely. `validate_prerequisites.mjs` reports it as `anypointSession`.
+- **`upgrade-mule-app`** — Duplicate `<server><id>` entries in `~/.m2/settings.xml` are now detected and reported (`duplicateServerIds` from `validate_prerequisites.mjs` and `write_maven_settings.mjs`) before any `mvn` call. Maven only warns about them, and a stale duplicate can shadow the correct credential without an explicit 401. The skill reports them and never edits the user's file.
+
 ## [1.9.5] - 2026-10-30
 
 ### Changed

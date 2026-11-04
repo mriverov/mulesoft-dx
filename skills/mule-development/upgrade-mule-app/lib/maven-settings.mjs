@@ -196,6 +196,56 @@ function readCredentials(opts) {
   return null;
 }
 
+/**
+ * Which kind of Anypoint session is available right now, without exposing the
+ * credential itself: 'client' | 'token' (live anypoint-cli-v4 session),
+ * 'acb' (Anypoint Code Builder's acb_settings.xml), or null when neither
+ * exists. Step 1 uses it to fail fast with "run anypoint-cli-v4 login"
+ * instead of letting a later CLI/Maven call fail opaquely.
+ *
+ * @param {{ acbTempDir?: string }} [opts]
+ * @returns {'client'|'token'|'acb'|null}
+ */
+export function detectCredentialKind(opts = {}) {
+  return readCredentials(opts)?.kind ?? null;
+}
+
+/**
+ * <server><id> values declared more than once in a settings.xml (commented-out
+ * blocks ignored). Maven accepts such a file with only a warning, and which
+ * duplicate wins depends on merge order, so a correct credential can be
+ * shadowed by a stale one with no 401 naming the cause.
+ *
+ * @param {string} xml contents of a settings.xml
+ * @returns {string[]} ids with more than one live <server> block, in file order
+ */
+export function findDuplicateServerIds(xml) {
+  const commentRanges = findCommentRanges(xml || '');
+  const serverRe = /<server\b[^>]*>[\s\S]*?<\/server>/g;
+  const counts = new Map();
+  let m;
+  while ((m = serverRe.exec(xml || '')) !== null) {
+    if (isInsideAnyRange(commentRanges, m.index)) continue;
+    const id = /<id>\s*([^<]*?)\s*<\/id>/.exec(m[0])?.[1];
+    if (id) counts.set(id, (counts.get(id) || 0) + 1);
+  }
+  return [...counts].filter(([, n]) => n > 1).map(([id]) => id);
+}
+
+/**
+ * Reads the real settings.xml (never writes it) and reports duplicate server
+ * ids. Returns [] when the file is missing or unreadable.
+ *
+ * @param {string} [sourcePath] defaults to ~/.m2/settings.xml
+ */
+export function duplicateServerIdsIn(sourcePath = join(homedir(), '.m2', 'settings.xml')) {
+  try {
+    return findDuplicateServerIds(readFileSync(sourcePath, 'utf8'));
+  } catch {
+    return [];
+  }
+}
+
 // Replace <username>/<password> inside every EXISTING <server> block whose
 // <id> is in EXCHANGE_SERVER_IDS. Tolerant of child-element order and
 // whitespace; every other <server>/<profile>/<mirror> in the file is left

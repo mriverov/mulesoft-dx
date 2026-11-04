@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import { readFileSync, writeFileSync, mkdirSync, mkdtempSync, rmSync, utimesSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { writeMavenSettings, looksLikeAuthFailure, cleanupMavenSettings } from './maven-settings.mjs';
+import { writeMavenSettings, looksLikeAuthFailure, cleanupMavenSettings, detectCredentialKind, findDuplicateServerIds, duplicateServerIdsIn } from './maven-settings.mjs';
 import { existsSync } from 'node:fs';
 
 // These tests exercise the pure settings.xml patching path with a fixture
@@ -484,4 +484,53 @@ test('looksLikeAuthFailure does not flag a bare 401/Unauthorized that appears in
   assert.equal(looksLikeAuthFailure(
     "[ERROR] flows.xml:[401,25] cvc-elt.1.a: Cannot find the declaration of element 'flow'."
   ), false);
+});
+
+// --- detectCredentialKind / findDuplicateServerIds ---------------------------
+
+test('detectCredentialKind is null with no CLI session and no acb_settings.xml', () => {
+  const acbTempDir = emptyAcbTempDir();
+  withFakeCli({}, () => {
+    assert.equal(detectCredentialKind({ acbTempDir }), null);
+  });
+  rmSync(acbTempDir, { recursive: true, force: true });
+});
+
+test('detectCredentialKind reports the kind of session without exposing it', () => {
+  const acbTempDir = emptyAcbTempDir();
+  withFakeCli({ token: 'tok-123' }, () => {
+    assert.equal(detectCredentialKind({ acbTempDir }), 'token');
+  });
+  withFakeCli({ client_id: 'id', client_secret: 'sec' }, () => {
+    assert.equal(detectCredentialKind({ acbTempDir }), 'client');
+  });
+  rmSync(acbTempDir, { recursive: true, force: true });
+});
+
+test('findDuplicateServerIds reports ids declared twice and ignores unique ones', () => {
+  const xml = `<settings><servers>
+    <server><id>nexus3</id><username>a</username><password>b</password></server>
+    <server><id>anypoint-exchange-v3</id><username>old</username><password>old</password></server>
+    <server><id> anypoint-exchange-v3 </id><username>new</username><password>new</password></server>
+  </servers></settings>`;
+  assert.deepEqual(findDuplicateServerIds(xml), ['anypoint-exchange-v3']);
+});
+
+test('findDuplicateServerIds ignores commented-out blocks and empty input', () => {
+  const xml = `<settings><servers>
+    <server><id>nexus3</id></server>
+    <!-- <server><id>nexus3</id></server> -->
+  </servers></settings>`;
+  assert.deepEqual(findDuplicateServerIds(xml), []);
+  assert.deepEqual(findDuplicateServerIds(''), []);
+  assert.deepEqual(findDuplicateServerIds(undefined), []);
+});
+
+test('duplicateServerIdsIn reads a file and returns [] when it is missing', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'maven-settings-dup-'));
+  const p = join(dir, 'settings.xml');
+  writeFileSync(p, '<settings><servers><server><id>x</id></server><server><id>x</id></server></servers></settings>');
+  assert.deepEqual(duplicateServerIdsIn(p), ['x']);
+  assert.deepEqual(duplicateServerIdsIn(join(dir, 'missing.xml')), []);
+  rmSync(dir, { recursive: true, force: true });
 });
